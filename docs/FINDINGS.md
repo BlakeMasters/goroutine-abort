@@ -38,9 +38,9 @@ asynchronous signals while the G is actually running.
 Directly invoking `goexit0` preserved the process but produced a malformed Go
 execution trace: the parser reported `expected no goroutine but had one`.
 
-Conclusion: hard abort must still use normal runtime lifecycle accounting. The
-current path invokes `goexit1` directly, which emits race/trace end state before
-destroying the G, while still skipping user defers.
+Conclusion: hard abort must preserve runtime lifecycle accounting. The current
+path emits race and trace end state from g0 before destroying the G, while still
+skipping user defers.
 
 ## Final contained evidence
 

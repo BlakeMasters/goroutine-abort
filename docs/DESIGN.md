@@ -34,10 +34,9 @@ Go's existing asynchronous-preemption signal handler calls
 reflection, assembly, non-Go, compiler-unsafe, stack-exhausted, locked-runtime,
 and other unsuitable PCs.
 
-The hard request is consumed at the very beginning of `asyncPreempt2`, before
-register state is transferred to the G and before scheduler bookkeeping begins.
-It calls the existing `goexit1` lifecycle path directly. This publishes race and
-trace completion, then reaches `gdestroy` without executing user defers.
+The hard request is consumed at the beginning of `asyncPreempt2`, before
+register state is transferred to the G. A g0 callback publishes race and trace
+completion, then calls `goexit0` without executing user defers.
 
 Graceful mode is marked ready at the same boundary and injected on the
 subsequent scheduler resume. A generic scheduler handoff can never certify a
