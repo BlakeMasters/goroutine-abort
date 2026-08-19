@@ -1,0 +1,153 @@
+diff --git a/src/runtime/preempt.go b/src/runtime/preempt.go
+--- a/src/runtime/preempt.go
++++ b/src/runtime/preempt.go
+@@ -315,6 +315,10 @@ func asyncPreempt()
+ //go:nosplit
+ //go:nowritebarrierrec
+ func asyncPreempt2() {
++	// The signal handler only enters here from a compiler/runtime-approved
++	// asynchronous safe point in ordinary user Go code.
++	prepareGoroutineAbortAtAsyncSafePoint()
++
+ 	// We can't grow the stack with untyped data from asyncPreempt, so switch to
+ 	// the system stack right away.
+ 	mcall(func(gp *g) {
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -3347,20 +3347,7 @@ func execute(gp *g, inheritTime bool) {
+ 	gp.waitsince = 0
+ 	gp.preempt = false
+ 	gp.stackguard0 = gp.stack.lo + stackGuard
+-	switch consumeGoroutineAbort(gp) {
+-	case GoroutineAbortGraceful:
+-		xRegDiscard(gp)
+-		prepareGracefulGoroutineAbort(gp)
+-	case GoroutineAbortHard:
+-		// Deliberately bypass Goexit and all user defers. This is the
+-		// destructive semantics under test. gdestroy clears runtime-owned
+-		// bookkeeping before the G can be reused.
+-		xRegDiscard(gp)
+-		goexit0(gp)
+-	case goroutineAbortNone:
+-	default:
+-		throw("invalid goroutine abort mode")
+-	}
++	prepareGoroutineAbortAtScheduler(gp)
+ 	if !inheritTime {
+ 		mp.p.ptr().schedtick++
+ 	}
+diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
+--- a/src/runtime/goroutine_abort.go
++++ b/src/runtime/goroutine_abort.go
+@@ -27,7 +27,10 @@ const (
+ 	GoroutineAbortHard
+ )
+ 
+-const goroutineAbortModeBits = 2
++const (
++	goroutineAbortModeBits      = 2
++	goroutineAbortGracefulReady = GoroutineAbortMode(3)
++)
+ 
+ // GoroutineHandle is an opaque identity for one incarnation of a goroutine.
+ // A recycled runtime g cannot be targeted through an older handle.
+@@ -56,11 +59,11 @@ func (h GoroutineHandle) Valid() bool {
+ 	return readgstatus(gp)&^_Gscan != _Gdead
+ }
+ 
+-// Abort requests termination of h at its next scheduler handoff.
++// Abort requests termination of h at an asynchronous user-code safe point.
+ //
+ // A true result means only that the request was attached to the matching
+ // goroutine incarnation. A goroutine blocked indefinitely outside a runnable
+-// Go safe point may never complete the request. Call Valid to observe eventual
++// asynchronous Go safe point may never complete the request. Call Valid to observe eventual
+ // termination. Abort rejects the calling goroutine and runtime system
+ // goroutines.
+ func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
+@@ -80,7 +83,10 @@ func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
+ 	for {
+ 		current := gp.abortRequest.Load()
+ 		currentGoid, currentMode := decodeGoroutineAbort(current)
+-		if currentGoid == h.goid && currentMode == GoroutineAbortHard {
++		if currentGoid == h.goid && (currentMode == GoroutineAbortHard ||
++			currentMode == goroutineAbortGracefulReady && mode == GoroutineAbortGraceful) {
++			// A hard request is never downgraded. A graceful request that has
++			// already crossed the user-code safe-point gate remains ready.
+ 			break
+ 		}
+ 		if gp.abortRequest.CompareAndSwap(current, request) {
+@@ -124,6 +130,72 @@ func consumeGoroutineAbort(gp *g) GoroutineAbortMode {
+ 	}
+ }
+ 
++// prepareGoroutineAbortAtAsyncSafePoint runs before asyncPreempt2 moves any
++// register or scheduler state onto the target G. isAsyncSafePoint has already
++// excluded runtime, reflect, assembly, unsafe compiler points, runtime locks,
++// stack exhaustion, and non-Go code.
++//
++//go:nosplit
++//go:nowritebarrierrec
++func prepareGoroutineAbortAtAsyncSafePoint() {
++	gp := getg()
++	for {
++		request := gp.abortRequest.Load()
++		goid, mode := decodeGoroutineAbort(request)
++		if goid != gp.goid {
++			return
++		}
++		switch mode {
++		case GoroutineAbortHard:
++			if !gp.abortRequest.CompareAndSwap(request, 0) {
++				continue
++			}
++			// Destruction is safe for runtime bookkeeping here because the
++			// interrupted instruction belongs to ordinary user Go code and
++			// asyncPreempt2 has not yet entered scheduler or xreg custody.
++			// User locks and invariants remain deliberately unprotected.
++			mcall(goexit0)
++			throw("hard goroutine abort returned")
++		case GoroutineAbortGraceful:
++			ready, _ := encodeGoroutineAbort(goid, goroutineAbortGracefulReady)
++			if gp.abortRequest.CompareAndSwap(request, ready) {
++				return
++			}
++		case goroutineAbortGracefulReady, goroutineAbortNone:
++			return
++		default:
++			throw("invalid goroutine abort mode")
++		}
++	}
++}
++
++// prepareGoroutineAbortAtScheduler never destroys a G merely because it was
++// made runnable. Such a G may still need to finish channel, timer, syscall, or
++// runtime bookkeeping. Only a graceful request already certified by the
++// async user-code gate can be injected here. All other requests are re-armed.
++func prepareGoroutineAbortAtScheduler(gp *g) {
++	request := gp.abortRequest.Load()
++	goid, mode := decodeGoroutineAbort(request)
++	if goid != gp.goid {
++		return
++	}
++	if mode == goroutineAbortGracefulReady {
++		if gp.abortRequest.CompareAndSwap(request, 0) {
++			xRegDiscard(gp)
++			prepareGracefulGoroutineAbort(gp)
++		}
++		return
++	}
++	if mode != GoroutineAbortGraceful && mode != GoroutineAbortHard {
++		throw("invalid goroutine abort mode")
++	}
++	gp.preempt = true
++	gp.stackguard0 = stackPreempt
++	if pp := gp.m.p.ptr(); pp != nil {
++		pp.preempt = true
++	}
++}
++
+ func prepareGracefulGoroutineAbort(gp *g) {
+ 	pc := abi.FuncPCABIInternal(goroutineAbortGoexit)
+ 	gostartcall(&gp.sched, unsafe.Pointer(pc), nil)

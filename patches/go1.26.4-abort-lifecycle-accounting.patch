@@ -1,0 +1,35 @@
+diff --git a/src/runtime/preempt.go b/src/runtime/preempt.go
+--- a/src/runtime/preempt.go
++++ b/src/runtime/preempt.go
+@@ -355,6 +355,10 @@ func init() {
+ 	total += funcMaxSPDelta(f)
+ 	f = findfunc(abi.FuncPCABIInternal(xRegRestore))
+ 	total += funcMaxSPDelta(f)
++	f = findfunc(abi.FuncPCABIInternal(prepareGoroutineAbortAtAsyncSafePoint))
++	total += funcMaxSPDelta(f)
++	f = findfunc(abi.FuncPCABIInternal(goexit1))
++	total += funcMaxSPDelta(f)
+ 	// Add some overhead for return PCs, etc.
+ 	asyncPreemptStack = uintptr(total) + 8*goarch.PtrSize
+ 	if asyncPreemptStack > stackNosplit {
+diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
+--- a/src/runtime/goroutine_abort.go
++++ b/src/runtime/goroutine_abort.go
+@@ -164,11 +164,12 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
+ 				continue
+ 			}
+ 			finishGoroutineAbortRequest()
+-			// Destruction is safe for runtime bookkeeping here because the
+-			// interrupted instruction belongs to ordinary user Go code and
+-			// asyncPreempt2 has not yet entered scheduler or xreg custody.
+-			// User locks and invariants remain deliberately unprotected.
+-			mcall(goexit0)
++			// goexit1 publishes the normal race and trace lifecycle events,
++			// then destroys the G without walking user defers. Calling it here
++			// is safe for runtime bookkeeping because the interrupted PC belongs
++			// to ordinary user Go code and asyncPreempt2 has not yet entered
++			// scheduler or xreg custody. User invariants remain unprotected.
++			goexit1()
+ 			throw("hard goroutine abort returned")
+ 		case GoroutineAbortGraceful:
+ 			ready, _ := encodeGoroutineAbort(goid, goroutineAbortGracefulReady)

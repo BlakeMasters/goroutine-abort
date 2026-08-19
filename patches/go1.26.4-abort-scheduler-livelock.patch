@@ -1,0 +1,17 @@
+diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
+--- a/src/runtime/goroutine_abort.go
++++ b/src/runtime/goroutine_abort.go
+@@ -209,11 +209,8 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+ 	if mode != GoroutineAbortGraceful && mode != GoroutineAbortHard {
+ 		throw("invalid goroutine abort mode")
+ 	}
+-	gp.preempt = true
+-	gp.stackguard0 = stackPreempt
+-	if pp := gp.m.p.ptr(); pp != nil {
+-		pp.preempt = true
+-	}
++	// Do not force a synchronous stack preemption here: a newly-runnable G
++	// may still need to finish runtime bookkeeping. sysmon owns safe retries.
+ }
+ 
+ func clearGoroutineAbortRequest(gp *g) {

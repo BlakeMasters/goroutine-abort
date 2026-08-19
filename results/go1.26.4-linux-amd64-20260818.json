@@ -1,0 +1,72 @@
+{
+  "schema": "go.goroutine-abort.acceptance.v1",
+  "status": "passed",
+  "run_date": "2026-08-18",
+  "platform": "linux/amd64",
+  "go_version": "go1.26.4",
+  "image_content_id": "sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b",
+  "network_policy": {
+    "preparation": "golang.org/x/tools@v0.33.0 only",
+    "build_and_test": "none"
+  },
+  "source_sha256": {
+    "abort_tests": "afb3550bdc382bd62a7e5a289e52762615bdd57900ac43bf4c427306d5f5351c",
+    "latency_probe": "868f2a4410487d60928d6b6ba7b7e0bbcaf4b7d3179f83877ef40692ee2530db",
+    "run_script": "02b477b547a6baa71c3965eb33c45ce9ab56a71a7ed46fcd50ce38a7db055718",
+    "preparation_script": "9b99a0b6e6f0c703dd5807615e317d5950200b206a027e37627d92ea31ee03fa"
+  },
+  "patches": [
+    {
+      "path": "patches/go1.26.4-goroutine-abort.patch",
+      "sha256": "e4c989b8d8e9830db8eb2666d9cce9382f55d8feb0e636c1bf60e7a17609a42e"
+    },
+    {
+      "path": "patches/go1.26.4-abort-safe-boundary.patch",
+      "sha256": "4df860cae100eaa34c4b8c945aaddb907f1140d32ac50f5f7343c4c310ce4631"
+    },
+    {
+      "path": "patches/go1.26.4-abort-sysmon-retry.patch",
+      "sha256": "df48381cb1c9ab9db0d031af1d6f96e281aeffffa47cb8fa44689dde63bbc162"
+    },
+    {
+      "path": "patches/go1.26.4-abort-scheduler-livelock.patch",
+      "sha256": "b8ce2947300b02db171c55094541861d386bf8a9a0a4674e0eefae145f168b24"
+    },
+    {
+      "path": "patches/go1.26.4-abort-lifecycle-accounting.patch",
+      "sha256": "80c2732014e923e2c7c35ac9605828b93d6da476f7c917225aec162c8125b342"
+    }
+  ],
+  "gates": {
+    "focused_tests": "passed",
+    "hard_abort_gc_cycles": 1000,
+    "repeated_basic_tests": "20x passed",
+    "trace_parse": "passed",
+    "race_detector": "passed",
+    "linux_386_compile": "passed",
+    "go_vet": "passed",
+    "upstream_runtime_tests": "passed"
+  },
+  "durations_seconds": {
+    "single_p_hard_abort_gc_churn": 135.24,
+    "upstream_runtime_tests": 147.136
+  },
+  "probe": {
+    "graceful": {
+      "accepted": 1000,
+      "completed": 1000,
+      "p50_nanoseconds": 7357,
+      "p95_nanoseconds": 22530,
+      "max_nanoseconds": 59180
+    },
+    "hard": {
+      "accepted": 1000,
+      "completed": 1000,
+      "p50_nanoseconds": 6391,
+      "p95_nanoseconds": 21533,
+      "max_nanoseconds": 128900
+    }
+  },
+  "evidence_index_sha256": "77799c2c94f6c792b9e2d70081aaa64fec09f842753175ba866d4ee93255221c",
+  "claim_ceiling": "Contained Linux/amd64 runtime-fork existence proof; not application safety, cross-platform proof, portable cgo interruption, or upstream readiness."
+}

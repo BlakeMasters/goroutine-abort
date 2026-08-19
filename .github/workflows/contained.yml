@@ -1,0 +1,87 @@
+name: Contained runtime experiment
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goroutine-abort-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      IMAGE_TAG: golang:1.26.4-bookworm
+      IMAGE_ID: sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
+      WORK_VOLUME: go-goroutine-abort-ci-work
+      PREP_CONTAINER: go-goroutine-abort-ci-prep
+      RUN_CONTAINER: go-goroutine-abort-ci-run
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Resolve exact Go image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE_TAG}"
+          actual="$(docker image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
+          test "${actual}" = "${IMAGE_ID}"
+
+      - name: Prepare checksum-bound module cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker volume create "${WORK_VOLUME}"
+          docker run --name "${PREP_CONTAINER}" \
+            --cpus 2 --memory 1g --memory-swap 1g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/lab,readonly" \
+            --mount "type=volume,src=${WORK_VOLUME},dst=/work" \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+            "${IMAGE_ID}" bash /lab/scripts/prepare-module-cache.sh
+
+      - name: Build and test without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --name "${RUN_CONTAINER}" --network none \
+            --cpus 4 --memory 4g --memory-swap 4g --pids-limit 512 \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/lab,readonly" \
+            --mount "type=volume,src=${WORK_VOLUME},dst=/work" \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+            "${IMAGE_ID}" timeout --signal=KILL 20m \
+            bash /lab/scripts/run-contained.sh
+
+      - name: Copy bounded evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/goroutine-abort-evidence"
+          if docker inspect "${RUN_CONTAINER}" >/dev/null 2>&1; then
+            docker cp "${RUN_CONTAINER}:/work/evidence/." \
+              "${RUNNER_TEMP}/goroutine-abort-evidence" || true
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: goroutine-abort-evidence
+          path: ${{ runner.temp }}/goroutine-abort-evidence
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Exact cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "${PREP_CONTAINER}" "${RUN_CONTAINER}" 2>/dev/null || true
+          docker volume rm "${WORK_VOLUME}" 2>/dev/null || true

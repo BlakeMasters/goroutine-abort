@@ -1,0 +1,234 @@
+diff --git a/src/runtime/runtime2.go b/src/runtime/runtime2.go
+--- a/src/runtime/runtime2.go
++++ b/src/runtime/runtime2.go
+@@ -506,6 +506,7 @@ type g struct {
+ 	atomicstatus atomic.Uint32
+ 	stackLock    uint32 // sigprof/scang lock; TODO: fold in to atomicstatus
+ 	goid         uint64
++	abortRequest atomic.Uint64
+ 	schedlink    guintptr
+ 	waitsince    int64      // approx time when the g become blocked
+ 	waitreason   waitReason // if status==Gwaiting
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -3347,5 +3347,19 @@ func execute(gp *g, inheritTime bool) {
+ 	gp.preempt = false
+ 	gp.stackguard0 = gp.stack.lo + stackGuard
++	switch consumeGoroutineAbort(gp) {
++	case GoroutineAbortGraceful:
++		xRegDiscard(gp)
++		prepareGracefulGoroutineAbort(gp)
++	case GoroutineAbortHard:
++		// Deliberately bypass Goexit and all user defers. This is the
++		// destructive semantics under test. gdestroy clears runtime-owned
++		// bookkeeping before the G can be reused.
++		xRegDiscard(gp)
++		goexit0(gp)
++	case goroutineAbortNone:
++	default:
++		throw("invalid goroutine abort mode")
++	}
+ 	if !inheritTime {
+ 		mp.p.ptr().schedtick++
+ 	}
+@@ -4516,5 +4530,9 @@ func gdestroy(gp *g) {
+ 	gp.preemptStop = false
++	gp.preemptShrink = false
++	gp.asyncSafePoint = false
++	xRegDiscard(gp)
+ 	gp.paniconfault = false
++	gp.abortRequest.Store(0)
+ 	gp._defer = nil // should be true already but just in case.
+ 	gp._panic = nil // non-nil for Goexit during panic. points at stack-allocated data.
+ 	gp.writebuf = nil
+diff --git a/src/runtime/preempt_xreg.go b/src/runtime/preempt_xreg.go
+--- a/src/runtime/preempt_xreg.go
++++ b/src/runtime/preempt_xreg.go
+@@ -124,6 +124,17 @@ func xRegRestore(gp *g) {
+ 	gp.xRegs.state = nil
+ }
+ 
++func xRegDiscard(gp *g) {
++	state := gp.xRegs.state
++	if state == nil {
++		return
++	}
++	gp.xRegs.state = nil
++	lock(&xRegAlloc.lock)
++	xRegAlloc.alloc.free(unsafe.Pointer(state))
++	unlock(&xRegAlloc.lock)
++}
++
+ func (xRegs *xRegPerP) free() {
+ 	if xRegs.cache != nil {
+ 		lock(&xRegAlloc.lock)
+diff --git a/src/runtime/preempt_noxreg.go b/src/runtime/preempt_noxreg.go
+--- a/src/runtime/preempt_noxreg.go
++++ b/src/runtime/preempt_noxreg.go
+@@ -27,4 +27,6 @@ func xRegSave(gp *g) {}
+ //go:nosplit
+ func xRegRestore(gp *g) {}
+ 
++func xRegDiscard(gp *g) {}
++
+ func (*xRegPerP) free() {}
+diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
+new file mode 100644
+--- /dev/null
++++ b/src/runtime/goroutine_abort.go
+@@ -0,0 +1,143 @@
++// Copyright 2026 The go-goroutine-abort authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the accompanying laboratory repository.
++
++package runtime
++
++import (
++	"internal/abi"
++	"unsafe"
++)
++
++// GoroutineAbortMode controls how a requested goroutine abort is completed.
++// This API is experimental and exists only in the laboratory runtime fork.
++type GoroutineAbortMode uint8
++
++const (
++	goroutineAbortNone GoroutineAbortMode = iota
++
++	// GoroutineAbortGraceful injects Goexit at the next scheduler handoff.
++	// Defers run and can delay or defeat termination.
++	GoroutineAbortGraceful
++
++	// GoroutineAbortHard destroys the goroutine at the next scheduler
++	// handoff. Defers do not run. Locks and application invariants can be
++	// permanently stranded.
++	GoroutineAbortHard
++)
++
++const goroutineAbortModeBits = 2
++
++// GoroutineHandle is an opaque identity for one incarnation of a goroutine.
++// A recycled runtime g cannot be targeted through an older handle.
++type GoroutineHandle struct {
++	gp   *g
++	goid uint64
++}
++
++// CurrentGoroutine returns a handle for the calling goroutine.
++func CurrentGoroutine() GoroutineHandle {
++	gp := getg()
++	if gp == nil || gp.goid == 0 || gp.m == nil || gp == gp.m.g0 || gp == gp.m.gsignal {
++		return GoroutineHandle{}
++	}
++	return GoroutineHandle{gp: gp, goid: gp.goid}
++}
++
++// Valid reports whether h still identifies its original live goroutine.
++func (h GoroutineHandle) Valid() bool {
++	gp := h.gp
++	if gp == nil || h.goid == 0 || gp.goid != h.goid {
++		return false
++	}
++	return readgstatus(gp)&^_Gscan != _Gdead
++}
++
++// Abort requests termination of h at its next scheduler handoff.
++//
++// A true result means only that the request was attached to the matching
++// goroutine incarnation. A goroutine blocked indefinitely outside a runnable
++// Go safe point may never complete the request. Call Valid to observe eventual
++// termination. Abort rejects the calling goroutine and runtime system
++// goroutines.
++func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
++	if mode != GoroutineAbortGraceful && mode != GoroutineAbortHard {
++		return false
++	}
++	gp := h.gp
++	if gp == nil || h.goid == 0 || gp == getg() || gp.goid != h.goid {
++		return false
++	}
++	if readgstatus(gp)&^_Gscan == _Gdead || isSystemGoroutine(gp, false) {
++		return false
++	}
++
++	request, ok := encodeGoroutineAbort(h.goid, mode)
++	if !ok {
++		return false
++	}
++	for {
++		current := gp.abortRequest.Load()
++		currentGoid, currentMode := decodeGoroutineAbort(current)
++		if currentGoid == h.goid && currentMode == GoroutineAbortHard {
++			break
++		}
++		if gp.abortRequest.CompareAndSwap(current, request) {
++			break
++		}
++	}
++
++	if gp.goid != h.goid || readgstatus(gp)&^_Gscan == _Gdead {
++		return false
++	}
++	requestGoroutineAbortPreemption(gp)
++	return true
++}
++
++func encodeGoroutineAbort(goid uint64, mode GoroutineAbortMode) (uint64, bool) {
++	if goid == 0 || goid > ^uint64(0)>>goroutineAbortModeBits {
++		return 0, false
++	}
++	return goid<<goroutineAbortModeBits | uint64(mode), true
++}
++
++func decodeGoroutineAbort(request uint64) (uint64, GoroutineAbortMode) {
++	return request >> goroutineAbortModeBits, GoroutineAbortMode(request & (1<<goroutineAbortModeBits - 1))
++}
++
++func requestGoroutineAbortPreemption(gp *g) {
++	gp.preempt = true
++	gp.stackguard0 = stackPreempt
++	mp := gp.m
++	if mp == nil || mp == getg().m {
++		return
++	}
++	if pp := mp.p.ptr(); pp != nil {
++		pp.preempt = true
++	}
++	if preemptMSupported && debug.asyncpreemptoff == 0 {
++		preemptM(mp)
++	}
++}
++
++func consumeGoroutineAbort(gp *g) GoroutineAbortMode {
++	for {
++		request := gp.abortRequest.Load()
++		goid, mode := decodeGoroutineAbort(request)
++		if goid != gp.goid {
++			return goroutineAbortNone
++		}
++		if gp.abortRequest.CompareAndSwap(request, 0) {
++			return mode
++		}
++	}
++}
++
++func prepareGracefulGoroutineAbort(gp *g) {
++	pc := abi.FuncPCABIInternal(goroutineAbortGoexit)
++	gostartcall(&gp.sched, unsafe.Pointer(pc), nil)
++}
++
++func goroutineAbortGoexit() {
++	Goexit()
++}
+diff --git a/src/runtime/sizeof_test.go b/src/runtime/sizeof_test.go
+--- a/src/runtime/sizeof_test.go
++++ b/src/runtime/sizeof_test.go
+@@ -20,6 +20,6 @@ func TestSizeof(t *testing.T) {
+ 		_32bit uintptr // size on 32bit platforms
+ 		_64bit uintptr // size on 64bit platforms
+ 	}{
+-		{runtime.G{}, 288 + xreg, 448 + xreg}, // g, but exported for testing
++		{runtime.G{}, 296 + xreg, 456 + xreg}, // one 64-bit incarnation-bound abort request
+ 		{runtime.Sudog{}, 64, 104},            // sudog, but exported for testing
+ 	}

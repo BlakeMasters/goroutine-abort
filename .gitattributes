@@ -1,0 +1,2 @@
+*.patch -whitespace
+scripts/prepare-module-cache.sh -whitespace

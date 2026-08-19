@@ -1,0 +1,121 @@
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -4529,7 +4529,7 @@ func gdestroy(gp *g) {
+ 	gp.asyncSafePoint = false
+ 	xRegDiscard(gp)
+ 	gp.paniconfault = false
+-	gp.abortRequest.Store(0)
++	clearGoroutineAbortRequest(gp)
+ 	gp._defer = nil // should be true already but just in case.
+ 	gp._panic = nil // non-nil for Goexit during panic. points at stack-allocated data.
+ 	gp.writebuf = nil
+@@ -6634,6 +6634,7 @@ const forcePreemptNS = 10 * 1000 * 1000 // 10ms
+ 
+ func retake(now int64) uint32 {
+ 	n := 0
++	abortPending := goroutineAbortPending.Load() != 0
+ 	// Prevent allp slice changes. This lock will be completely
+ 	// uncontended unless we're already stopping the world.
+ 	lock(&allpLock)
+@@ -6658,5 +6659,8 @@ func retake(now int64) uint32 {
+ 			continue
+ 		}
++		if abortPending && preemptPendingGoroutineAbort(pp) {
++			n++
++		}
+ 		pd := &pp.sysmontick
+ 		sysretake := false
+ 
+diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
+--- a/src/runtime/goroutine_abort.go
++++ b/src/runtime/goroutine_abort.go
+@@ -6,5 +6,6 @@ package runtime
+ 
+ import (
+ 	"internal/abi"
++	"internal/runtime/atomic"
+ 	"unsafe"
+ )
+@@ -32,6 +33,8 @@ const (
+ 	goroutineAbortGracefulReady = GoroutineAbortMode(3)
+ )
+ 
++var goroutineAbortPending atomic.Int64
++
+ // GoroutineHandle is an opaque identity for one incarnation of a goroutine.
+ // A recycled runtime g cannot be targeted through an older handle.
+ type GoroutineHandle struct {
+@@ -90,9 +93,16 @@ func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
+ 			// already crossed the user-code safe-point gate remains ready.
+ 			break
+ 		}
++		firstRequest := current == 0
++		if firstRequest {
++			goroutineAbortPending.Add(1)
++		}
+ 		if gp.abortRequest.CompareAndSwap(current, request) {
+ 			break
+ 		}
++		if firstRequest {
++			goroutineAbortPending.Add(-1)
++		}
+ 	}
+ 
+ 	if gp.goid != h.goid || readgstatus(gp)&^_Gscan == _Gdead {
+@@ -150,6 +160,7 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
+ 			if !gp.abortRequest.CompareAndSwap(request, 0) {
+ 				continue
+ 			}
++			finishGoroutineAbortRequest()
+ 			// Destruction is safe for runtime bookkeeping here because the
+ 			// interrupted instruction belongs to ordinary user Go code and
+ 			// asyncPreempt2 has not yet entered scheduler or xreg custody.
+@@ -184,6 +195,7 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+ 	}
+ 	if mode == goroutineAbortGracefulReady {
+ 		if gp.abortRequest.CompareAndSwap(request, 0) {
++			finishGoroutineAbortRequest()
+ 			xRegDiscard(gp)
+ 			prepareGracefulGoroutineAbort(gp)
+ 		}
+@@ -202,6 +214,39 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+ 	}
+ }
+ 
++func clearGoroutineAbortRequest(gp *g) {
++	if gp.abortRequest.Swap(0) != 0 {
++		finishGoroutineAbortRequest()
++	}
++}
++
++func finishGoroutineAbortRequest() {
++	if goroutineAbortPending.Add(-1) < 0 {
++		throw("negative pending goroutine abort count")
++	}
++}
++
++// preemptPendingGoroutineAbort is called by sysmon for running Ps while at
++// least one abort request exists. It retries the ordinary async-preemption
++// signal until the target is caught at a user-code safe point. This avoids a
++// scan of all Gs and adds only one atomic load to an idle sysmon iteration.
++func preemptPendingGoroutineAbort(pp *p) bool {
++	mp := pp.m.ptr()
++	if mp == nil || mp == getg().m {
++		return false
++	}
++	gp := mp.curg
++	if gp == nil || gp == mp.g0 {
++		return false
++	}
++	request := gp.abortRequest.Load()
++	goid, mode := decodeGoroutineAbort(request)
++	if goid != gp.goid || (mode != GoroutineAbortGraceful && mode != GoroutineAbortHard) {
++		return false
++	}
++	return preemptone(pp)
++}
++
+ func prepareGracefulGoroutineAbort(gp *g) {
+ 	pc := abi.FuncPCABIInternal(goroutineAbortGoexit)
+ 	gostartcall(&gp.sched, unsafe.Pointer(pc), nil)

@@ -1,0 +1,9 @@
+.tmp/
+evidence/
+.local/
+bin/
+dist/
+*.test
+*.trace
+coverage.out
+*.prof
