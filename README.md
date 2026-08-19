@@ -37,4 +37,4 @@ runtime version and environment.
 See [DESIGN.md](docs/DESIGN.md), [FINDINGS.md](docs/FINDINGS.md), and
 [patches/README.md](patches/README.md).
 
-BSD 3-Clause License. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).

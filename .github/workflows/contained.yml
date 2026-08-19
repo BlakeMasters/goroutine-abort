@@ -17,8 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      IMAGE_TAG: golang:1.26.4-bookworm
-      IMAGE_ID: sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
+      IMAGE_REF: golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
       WORK_VOLUME: go-goroutine-abort-ci-work
       PREP_CONTAINER: go-goroutine-abort-ci-prep
       RUN_CONTAINER: go-goroutine-abort-ci-run
@@ -30,9 +29,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull "${IMAGE_TAG}"
-          actual="$(docker image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
-          test "${actual}" = "${IMAGE_ID}"
+          docker pull "${IMAGE_REF}"
+          docker image inspect "${IMAGE_REF}" >/dev/null
 
       - name: Prepare checksum-bound module cache
         shell: bash
@@ -45,7 +43,7 @@ jobs:
             --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/lab,readonly" \
             --mount "type=volume,src=${WORK_VOLUME},dst=/work" \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
-            "${IMAGE_ID}" bash /lab/scripts/prepare-module-cache.sh
+            "${IMAGE_REF}" bash /lab/scripts/prepare-module-cache.sh
 
       - name: Build and test without network
         shell: bash
@@ -57,7 +55,7 @@ jobs:
             --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/lab,readonly" \
             --mount "type=volume,src=${WORK_VOLUME},dst=/work" \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
-            "${IMAGE_ID}" timeout --signal=KILL 20m \
+            "${IMAGE_REF}" timeout --signal=KILL 20m \
             bash /lab/scripts/run-contained.sh
 
       - name: Copy bounded evidence
