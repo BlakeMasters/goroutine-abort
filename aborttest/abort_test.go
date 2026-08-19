@@ -32,13 +32,17 @@ func startAbortable(t *testing.T, body func()) runtime.GoroutineHandle {
 
 func waitStopped(t *testing.T, handle runtime.GoroutineHandle) {
 	t.Helper()
-	deadline := time.Now().Add(testTimeout)
+	if !stoppedWithin(handle, testTimeout) {
+		t.Fatal("goroutine remained valid after abort deadline")
+	}
+}
+
+func stoppedWithin(handle runtime.GoroutineHandle, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for handle.Valid() && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}
-	if handle.Valid() {
-		t.Fatal("goroutine remained valid after abort deadline")
-	}
+	return !handle.Valid()
 }
 
 func waitSignal(t *testing.T, signal <-chan struct{}, label string) {
@@ -219,7 +223,11 @@ func TestHardAbortChurnWithGC(t *testing.T) {
 		if !handle.Abort(runtime.GoroutineAbortHard) {
 			t.Fatalf("cycle %d: hard abort was not accepted", cycle)
 		}
-		waitStopped(t, handle)
+		if !stoppedWithin(handle, 10*time.Second) {
+			stack := make([]byte, 1<<20)
+			n := runtime.Stack(stack, true)
+			t.Fatalf("cycle %d: goroutine remained valid after 10s\n%s", cycle, stack[:n])
+		}
 		if cycle%100 == 0 {
 			runtime.GC()
 		}

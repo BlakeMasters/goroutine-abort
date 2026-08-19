@@ -46,7 +46,7 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
  // GoroutineHandle is an opaque identity for one incarnation of a goroutine.
  // A recycled runtime g cannot be targeted through an older handle.
  type GoroutineHandle struct {
-@@ -90,9 +93,16 @@ func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
+@@ -90,9 +93,19 @@ func (h GoroutineHandle) Abort(mode GoroutineAbortMode) bool {
  			// already crossed the user-code safe-point gate remains ready.
  			break
  		}
@@ -55,6 +55,9 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
 +			goroutineAbortPending.Add(1)
 +		}
  		if gp.abortRequest.CompareAndSwap(current, request) {
++			if firstRequest {
++				wakeGoroutineAbortSysmon()
++			}
  			break
  		}
 +		if firstRequest {
@@ -63,7 +66,7 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
  	}
  
  	if gp.goid != h.goid || readgstatus(gp)&^_Gscan == _Gdead {
-@@ -150,6 +160,7 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
+@@ -150,6 +163,7 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
  			if !gp.abortRequest.CompareAndSwap(request, 0) {
  				continue
  			}
@@ -71,7 +74,7 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
  			// Destruction is safe for runtime bookkeeping here because the
  			// interrupted instruction belongs to ordinary user Go code and
  			// asyncPreempt2 has not yet entered scheduler or xreg custody.
-@@ -184,6 +195,7 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+@@ -184,6 +198,7 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
  	}
  	if mode == goroutineAbortGracefulReady {
  		if gp.abortRequest.CompareAndSwap(request, 0) {
@@ -79,7 +82,7 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
  			xRegDiscard(gp)
  			prepareGracefulGoroutineAbort(gp)
  		}
-@@ -202,6 +214,39 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+@@ -202,6 +217,48 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
  	}
  }
  
@@ -93,6 +96,15 @@ diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
 +	if goroutineAbortPending.Add(-1) < 0 {
 +		throw("negative pending goroutine abort count")
 +	}
++}
++
++func wakeGoroutineAbortSysmon() {
++	lock(&sched.lock)
++	if sched.sysmonwait.Load() {
++		sched.sysmonwait.Store(false)
++		notewakeup(&sched.sysmonnote)
++	}
++	unlock(&sched.lock)
 +}
 +
 +// preemptPendingGoroutineAbort is called by sysmon for running Ps while at

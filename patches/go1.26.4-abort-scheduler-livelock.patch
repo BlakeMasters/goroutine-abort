@@ -1,7 +1,7 @@
 diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
 --- a/src/runtime/goroutine_abort.go
 +++ b/src/runtime/goroutine_abort.go
-@@ -209,11 +209,8 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
+@@ -212,11 +212,8 @@ func prepareGoroutineAbortAtScheduler(gp *g) {
  	if mode != GoroutineAbortGraceful && mode != GoroutineAbortHard {
  		throw("invalid goroutine abort mode")
  	}

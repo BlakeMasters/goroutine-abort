@@ -15,7 +15,7 @@ diff --git a/src/runtime/preempt.go b/src/runtime/preempt.go
 diff --git a/src/runtime/goroutine_abort.go b/src/runtime/goroutine_abort.go
 --- a/src/runtime/goroutine_abort.go
 +++ b/src/runtime/goroutine_abort.go
-@@ -164,11 +164,12 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
+@@ -167,11 +167,12 @@ func prepareGoroutineAbortAtAsyncSafePoint() {
  				continue
  			}
  			finishGoroutineAbortRequest()
